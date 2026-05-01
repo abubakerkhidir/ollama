@@ -31,6 +31,32 @@
 
 #if defined(GGML_USE_HIP)
 #include "vendors/hip.h"
+
+// Map HIP compiler's per-arch macros (__gfxNNNN__) to ggml's architecture-class macros.
+// The HIP compiler auto-defines __gfxNNNN__ when compiling for that specific target.
+// Kernel code in this repo uses RDNA2 / RDNA3 / CDNA to select optimised paths
+// (e.g. __builtin_amdgcn_sdot4 for DP4A).  Without these definitions the kernels
+// fall back to generic scalar emulation, which is ~6x slower.
+// Note: __gfx906__ (Vega20/Radeon VII) is already handled directly in the code.
+#  if !defined(RDNA2) && !defined(RDNA3) && !defined(RDNA4) && !defined(GCN) && !defined(CDNA)
+#    if defined(__gfx1030__) || defined(__gfx1031__) || defined(__gfx1032__) || \
+        defined(__gfx1033__) || defined(__gfx1034__) || defined(__gfx1035__) || \
+        defined(__gfx1036__)
+       // RDNA2: RX 6000 series — has hardware sdot4 / dp4a, warpsize=32
+#      define RDNA2
+#    elif defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1102__) || \
+          defined(__gfx1103__)
+       // RDNA3: RX 7000 series — has hardware wmma, warpsize=32
+#      define RDNA3
+#    elif defined(__gfx908__) || defined(__gfx90a__)
+       // CDNA1/CDNA2: MI100 / MI210 — MFMA capable, warpsize=64
+#      define CDNA
+#    elif defined(__gfx906__) || defined(__gfx900__) || defined(__gfx803__)
+       // GCN5/GCN4/Vega10 — warpsize=64; __gfx906__ is also tested directly in dp4a
+#      define GCN
+#    endif
+#  endif
+
 #elif defined(GGML_USE_MUSA)
 #include "vendors/musa.h"
 #else

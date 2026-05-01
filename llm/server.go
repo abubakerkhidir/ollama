@@ -273,12 +273,27 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 
 	gpuLibs := ml.LibraryPaths(gpus)
 	status := NewStatusWriter(os.Stderr)
+	visibleDevEnvs := ml.GetVisibleDevicesEnv(gpus, false)
+	// For ROCm (AMD), custom MMQ/GEMV kernels are faster than rocBLAS for
+	// quantized models in generation mode (batch size 1). Force them on
+	// unless the user has already set either flag explicitly.
+	if _, mmqSet := os.LookupEnv("GGML_CUDA_FORCE_MMQ"); !mmqSet {
+		if _, cublasSet := os.LookupEnv("GGML_CUDA_FORCE_CUBLAS"); !cublasSet {
+			for _, gpu := range gpus {
+				if gpu.Library == "ROCm" {
+					visibleDevEnvs["GGML_CUDA_FORCE_MMQ"] = "1"
+					slog.Info("ROCm: forcing MMQ kernels (faster than rocBLAS for quantized generation)")
+					break
+				}
+			}
+		}
+	}
 	cmd, port, err := StartRunner(
 		tok != nil,
 		modelPath,
 		gpuLibs,
 		status,
-		ml.GetVisibleDevicesEnv(gpus, false),
+		visibleDevEnvs,
 	)
 
 	s := llmServer{
