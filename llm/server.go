@@ -1013,8 +1013,45 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 	// Example: OLLAMA_GPU_LAYER_SPLIT=42,58 → GPU0 gets 42% of layers, GPU1 gets 58%.
 	if split := envconfig.GpuLayerSplit(); len(split) > 0 && len(systemGPUs) > 0 {
 		gpuLayers := splitLayersByFraction(systemGPUs, layers, split)
-		slog.Debug("layer split override", "split", split, "result", gpuLayers)
-		return gpuLayers, layers
+
+		// Verify each GPU has enough free VRAM for its assigned layers before committing
+		// to the split. If another model is still resident (e.g. keep-alive not yet expired),
+		// a GPU may not have enough free space, causing an OOM crash in the runner process.
+		// In that case, fall through to the normal VRAM-aware scheduler which will distribute
+		// layers according to actual available memory.
+		fits := true
+		for _, gl := range gpuLayers {
+			var freeMemory, minMemory, graph uint64
+			for i := range systemGPUs {
+				if systemGPUs[i].DeviceID == gl.DeviceID {
+					freeMemory = systemGPUs[i].FreeMemory
+					minMemory = systemGPUs[i].MinimumMemory()
+					break
+				}
+			}
+			for j := range memory.GPUs {
+				if memory.GPUs[j].DeviceID == gl.DeviceID {
+					graph = memory.GPUs[j].Graph
+					break
+				}
+			}
+			var needed uint64
+			for _, l := range gl.Layers {
+				needed += layers[l]
+			}
+			needed += graph + minMemory
+			if needed > freeMemory {
+				slog.Debug("layer split override: insufficient VRAM on GPU, using VRAM-aware scheduler",
+					"gpu", gl.ID, "needed", format.HumanBytes2(needed), "free", format.HumanBytes2(freeMemory))
+				fits = false
+				break
+			}
+		}
+
+		if fits {
+			slog.Debug("layer split override", "split", split, "result", gpuLayers)
+			return gpuLayers, layers
+		}
 	}
 
 	gpuLayers := ml.GPULayersList{}
