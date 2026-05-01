@@ -952,6 +952,22 @@ func (s *llmServer) createLayout(systemInfo ml.SystemInfo, systemGPUs []ml.Devic
 
 func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, backoff float32) (ml.GPULayersList, []uint64) {
 	gpus := append(make([]ml.DeviceInfo, 0, len(systemGPUs)), systemGPUs...)
+	
+	// Apply per-GPU VRAM weights (OLLAMA_GPU_VRAM_WEIGHTS, comma-separated floats in detection order).
+	// Multiplying a GPU's FreeMemory by a weight > 1 biases the layer scheduler toward that GPU.
+	// Example: OLLAMA_GPU_VRAM_WEIGHTS=2.0,1.0 doubles the effective VRAM of the first detected GPU,
+	// useful when that GPU has higher memory bandwidth (e.g. HBM2 vs GDDR6).
+	if weights := envconfig.GpuVramWeights(); len(weights) > 0 {
+		for i := range gpus {
+			for j, sg := range systemGPUs {
+				if gpus[i].DeviceID == sg.DeviceID && j < len(weights) {
+					gpus[i].FreeMemory = uint64(float32(gpus[i].FreeMemory) * weights[j])
+					break
+				}
+			}
+		}
+	}
+
 	sort.Sort(sort.Reverse(ml.ByFreeMemory(gpus)))
 
 	layers := make([]uint64, len(memory.CPU.Weights))

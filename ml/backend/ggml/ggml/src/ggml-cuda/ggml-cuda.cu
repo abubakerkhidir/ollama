@@ -267,13 +267,21 @@ static ggml_cuda_device_info ggml_cuda_init() {
     for (int id = 0; id < info.device_count; ++id) {
         int device_vmm = 0;
 
+
 #if defined(GGML_USE_HIP)
         if (std::getenv("GGML_CUDA_INIT") != NULL) {
-            GGML_LOG_INFO("%s: initializing rocBLAS on device %d\n", __func__, id);
-            CUDA_CHECK(cudaSetDevice(id));
-            // rocblas_initialize will SIGABRT if the GPU isn't supported
-            rocblas_initialize();
-            GGML_LOG_INFO("%s: rocBLAS initialized on device %d\n", __func__, id);
+            // Skip rocBLAS init for gfx906 (Vega20/Radeon VII): no Tensile kernels in ROCm 7.
+            // rocblas_initialize will SIGABRT on unsupported or incompatible devices.
+            cudaDeviceProp hip_prop_tmp;
+            CUDA_CHECK(cudaGetDeviceProperties(&hip_prop_tmp, id));
+            if (strncmp(hip_prop_tmp.gcnArchName, "gfx906", 6) != 0) {
+                GGML_LOG_INFO("%s: initializing rocBLAS on device %d (%s)\n", __func__, id, hip_prop_tmp.gcnArchName);
+                CUDA_CHECK(cudaSetDevice(id));
+                rocblas_initialize();
+                GGML_LOG_INFO("%s: rocBLAS initialized on device %d\n", __func__, id);
+            } else {
+                GGML_LOG_INFO("%s: skipping rocBLAS on device %d (%s): no Tensile kernels in ROCm 7\n", __func__, id, hip_prop_tmp.gcnArchName);
+            }
         }
 #endif
 
@@ -2373,6 +2381,22 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     bool use_batched_cublas_bf16 = src0->type == GGML_TYPE_BF16 && bf16_mma_hardware_available(cc);
     bool use_batched_cublas_f32  = src0->type == GGML_TYPE_F32;
 
+#if defined(GGML_USE_HIP)
+    // When rocBLAS is disabled (e.g. gfx906 has no Tensile kernels in ROCm 7),
+    // disable the cuBLAS/rocBLAS batched GEMM paths to avoid a crash in
+    // cublasCreate() / rocblas_initialize().
+    // Note: do NOT force use_mul_mat_f here — that kernel requires WMMA/Tensor
+    // Core hardware (unavailable on GCN5/gfx906). For small batches (<=8)
+    // use_mul_mat_vec_f already covers F16/BF16/F32; for larger batches the
+    // else-branch cublas call is guarded via the null handle in common.cuh.
+    if (cc == GGML_CUDA_CC_VEGA20) {
+        // gfx906 (Radeon VII / Vega20): no Tensile kernels in ROCm 7, skip rocBLAS paths.
+        use_batched_cublas_f16  = false;
+        use_batched_cublas_bf16 = false;
+        use_batched_cublas_f32  = false;
+    }
+#endif
+
     if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
         // but this is only faster for GPUs without tensor cores or with a thin src0 matrix (particularly KQV in attention)
@@ -2394,6 +2418,15 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     } else if (use_mul_mat_q) {
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
+	#if defined(GGML_USE_HIP)
+                // When rocBLAS is disabled and no GPU kernel matches (e.g. F16/BF16/F32
+                // GEMM with batch > 8 on gfx906), avoid crashing on a null cublas handle.
+                // Zero-fill dst so graph reservation succeeds; actual generation always
+                // takes the use_mul_mat_vec_f path (batch=1) and never reaches here.
+                if (ctx.cublas_handle() == nullptr) {
+                    CUDA_CHECK(cudaMemsetAsync(dst->data, 0, ggml_nbytes(dst), ctx.stream()));
+                } else
+        #endif
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
 }

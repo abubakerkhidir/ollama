@@ -296,6 +296,29 @@ func Uint64(key string, defaultValue uint64) func() uint64 {
 // Set aside VRAM per GPU
 var GpuOverhead = Uint64("OLLAMA_GPU_OVERHEAD", 0)
 
+// GpuVramWeights returns per-GPU virtual VRAM multipliers applied during layer assignment.
+// Specify as a comma-separated list of positive floats in GPU detection order.
+// Example: OLLAMA_GPU_VRAM_WEIGHTS=2.0,1.0 doubles effective VRAM of the first detected GPU,
+// causing the layer scheduler to assign it proportionally more layers.
+func GpuVramWeights() []float32 {
+	s := Var("OLLAMA_GPU_VRAM_WEIGHTS")
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	weights := make([]float32, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if v, err := strconv.ParseFloat(p, 32); err == nil && v > 0 {
+			weights = append(weights, float32(v))
+		} else {
+			slog.Warn("invalid OLLAMA_GPU_VRAM_WEIGHTS value, skipping", "value", p)
+		}
+	}
+	return weights
+}
+
+
 type EnvVar struct {
 	Name        string
 	Value       any

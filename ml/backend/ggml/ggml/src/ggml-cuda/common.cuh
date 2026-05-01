@@ -1278,6 +1278,13 @@ struct ggml_backend_cuda_context {
     ggml_cuda_stream_context & stream_context() { return concurrent_stream_context; }
 
     cublasHandle_t cublas_handle(int device) {
+	#if defined(GGML_USE_HIP)
+                // Skip rocBLAS for gfx906 (Vega20/Radeon VII): no Tensile kernels in ROCm 7.
+                // gfx1030 (RDNA2/RX 6800) and later have Tensile kernels and should use rocBLAS.
+                if (ggml_cuda_info().devices[device].cc == GGML_CUDA_CC_VEGA20) {
+                    return nullptr;
+                }
+        #endif
         if (cublas_handles[device] == nullptr) {
             ggml_cuda_set_device(device);
             CUBLAS_CHECK(cublasCreate(&cublas_handles[device]));

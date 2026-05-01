@@ -10,6 +10,7 @@ build
 *.exe
 .idea
 test_data
+build-rocm7
 *.crt
 __debug_bin*
 llama/build
