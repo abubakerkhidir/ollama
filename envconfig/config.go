@@ -296,6 +296,36 @@ func Uint64(key string, defaultValue uint64) func() uint64 {
 // Set aside VRAM per GPU
 var GpuOverhead = Uint64("OLLAMA_GPU_OVERHEAD", 0)
 
+// GpuLayerSplit returns per-GPU layer fractions from OLLAMA_GPU_LAYER_SPLIT (e.g. "30,70").
+// Values are percentages in GPU detection order and are normalized to sum to 1.0.
+// When set, the VRAM-based scheduler is bypassed and layers are assigned directly.
+// Example: OLLAMA_GPU_LAYER_SPLIT=42,58 gives GPU0 42% of layers and GPU1 58%.
+func GpuLayerSplit() []float32 {
+	s := Var("OLLAMA_GPU_LAYER_SPLIT")
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	vals := make([]float32, 0, len(parts))
+	var total float32
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if v, err := strconv.ParseFloat(p, 32); err == nil && v >= 0 {
+			vals = append(vals, float32(v))
+			total += float32(v)
+		} else {
+			slog.Warn("invalid OLLAMA_GPU_LAYER_SPLIT value, skipping", "value", p)
+		}
+	}
+	if total == 0 || len(vals) == 0 {
+		return nil
+	}
+	for i := range vals {
+		vals[i] /= total
+	}
+	return vals
+}
+
 // GpuVramWeights returns per-GPU virtual VRAM multipliers applied during layer assignment.
 // Specify as a comma-separated list of positive floats in GPU detection order.
 // Example: OLLAMA_GPU_VRAM_WEIGHTS=2.0,1.0 doubles effective VRAM of the first detected GPU,
@@ -317,7 +347,6 @@ func GpuVramWeights() []float32 {
 	}
 	return weights
 }
-
 
 type EnvVar struct {
 	Name        string

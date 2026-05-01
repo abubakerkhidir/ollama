@@ -950,9 +950,36 @@ func (s *llmServer) createLayout(systemInfo ml.SystemInfo, systemGPUs []ml.Devic
 	return gpuLayers, nil
 }
 
+// splitLayersByFraction assigns layers to GPUs in detection order according to the
+// given normalized fractions. Each GPU receives floor(fraction * total) layers,
+// with any remainder given to the last GPU.
+func splitLayersByFraction(systemGPUs []ml.DeviceInfo, layers []uint64, split []float32) ml.GPULayersList {
+	total := len(layers)
+	result := ml.GPULayersList{}
+	idx := 0
+	for i := 0; i < len(systemGPUs) && i < len(split); i++ {
+		var count int
+		if i == len(split)-1 || i == len(systemGPUs)-1 {
+			count = total - idx // last GPU gets all remaining layers
+		} else {
+			count = int(float32(total) * split[i])
+		}
+		if count <= 0 || idx >= total {
+			break
+		}
+		gl := ml.GPULayers{DeviceID: systemGPUs[i].DeviceID}
+		for j := idx; j < idx+count && j < total; j++ {
+			gl.Layers = append(gl.Layers, j)
+		}
+		result = append(result, gl)
+		idx += count
+	}
+	return result
+}
+
 func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMemory, requireFull bool, backoff float32) (ml.GPULayersList, []uint64) {
 	gpus := append(make([]ml.DeviceInfo, 0, len(systemGPUs)), systemGPUs...)
-	
+
 	// Apply per-GPU VRAM weights (OLLAMA_GPU_VRAM_WEIGHTS, comma-separated floats in detection order).
 	// Multiplying a GPU's FreeMemory by a weight > 1 biases the layer scheduler toward that GPU.
 	// Example: OLLAMA_GPU_VRAM_WEIGHTS=2.0,1.0 doubles the effective VRAM of the first detected GPU,
@@ -979,6 +1006,15 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 		layers[i] += memory.CPU.Weights[i]
 		layers[i] += memory.CPU.Cache[i]
 		logutil.Trace("layer to assign", "layer", i, "size", format.HumanBytes2(layers[i]))
+	}
+
+	// If OLLAMA_GPU_LAYER_SPLIT is set, bypass the VRAM scheduler and assign layers directly
+	// according to the given percentages (in GPU detection order).
+	// Example: OLLAMA_GPU_LAYER_SPLIT=42,58 → GPU0 gets 42% of layers, GPU1 gets 58%.
+	if split := envconfig.GpuLayerSplit(); len(split) > 0 && len(systemGPUs) > 0 {
+		gpuLayers := splitLayersByFraction(systemGPUs, layers, split)
+		slog.Debug("layer split override", "split", split, "result", gpuLayers)
+		return gpuLayers, layers
 	}
 
 	gpuLayers := ml.GPULayersList{}
