@@ -2397,6 +2397,22 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
     }
 #endif
 
+#if defined(GGML_USE_HIP)
+    // One-time per-device diagnostic: log which mul_mat path is chosen for quantized ops.
+    // Helps diagnose slow inference (e.g. scalar DP4A fallback vs hardware sdot4).
+    if (ggml_is_quantized(src0->type)) {
+        static std::atomic<int> s_logged{0};
+        if (s_logged.fetch_add(1) < 4) {
+            GGML_LOG_INFO("mul_mat diag: dev=%d cc=0x%x src0=%s ne11=%lld "
+                "use_mmvq=%d use_mmq=%d cublas_f16=%d cublas_bf16=%d cublas_f32=%d split=%d\n",
+                ctx.device, cc, ggml_type_name(src0->type), (long long)src1->ne[1],
+                (int)use_mul_mat_vec_q, (int)use_mul_mat_q,
+                (int)use_batched_cublas_f16, (int)use_batched_cublas_bf16, (int)use_batched_cublas_f32,
+                (int)split);
+        }
+    }
+#endif
+
     if (!split && use_mul_mat_vec_f) {
         // the custom F16 vector kernel can be used over batched cuBLAS GEMM
         // but this is only faster for GPUs without tensor cores or with a thin src0 matrix (particularly KQV in attention)
