@@ -1,0 +1,20 @@
+# Go module cache and build artifacts
+root/
+vendor/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
