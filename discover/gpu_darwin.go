@@ -108,11 +108,11 @@ func GetAllMetalDevices() []MetalDevice {
 	return devices
 }
 
-// FindExternalAMDGPUIndex returns the zero-based Metal device index of the
-// first external AMD GPU (eGPU) present in the system, or -1 if none is
-// found.  This covers Radeon VII (gfx906) and RX 6800 (gfx1030) attached
-// via Thunderbolt.
-func FindExternalAMDGPUIndex() int {
+// FindExternalGPUIndex returns the zero-based Metal device index of the
+// first external GPU (eGPU) present in the system, or -1 if none is found.
+// An eGPU is any removable Metal device, including AMD Radeon VII (gfx906)
+// and RX 6800 (gfx1030) attached via Thunderbolt.
+func FindExternalGPUIndex() int {
 	for _, dev := range GetAllMetalDevices() {
 		if dev.Removable {
 			slog.Info("external Metal GPU (eGPU) detected",

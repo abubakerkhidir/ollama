@@ -45,9 +45,9 @@ func metalDeviceEnvs() map[string]string {
 	// Auto-detect: log a helpful hint if an eGPU is present but not yet
 	// selected.  We do not auto-select because the default device may be
 	// intentional (e.g. when benchmarking internal vs external GPU).
-	if eGPUIdx := FindExternalAMDGPUIndex(); eGPUIdx >= 0 {
+	if eGPUIdx := FindExternalGPUIndex(); eGPUIdx >= 0 {
 		slog.Warn(
-			"external AMD GPU (eGPU) detected but OLLAMA_METAL_DEVICE is not set; "+
+			"external GPU (eGPU) detected but OLLAMA_METAL_DEVICE is not set; "+
 				"inference will use the default Metal device",
 			"hint", "set OLLAMA_METAL_DEVICE="+strconv.Itoa(eGPUIdx)+" to use the eGPU",
 		)

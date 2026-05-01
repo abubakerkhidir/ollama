@@ -131,7 +131,7 @@ operations.
 When the variable is **not** set but an eGPU is detected, a warning is emitted:
 
 ```
-WARN external AMD GPU (eGPU) detected but OLLAMA_METAL_DEVICE is not set; \
+WARN external GPU (eGPU) detected but OLLAMA_METAL_DEVICE is not set; \
      inference will use the default Metal device  \
      hint="set OLLAMA_METAL_DEVICE=1 to use the eGPU"
 ```

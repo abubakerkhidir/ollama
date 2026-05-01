@@ -256,14 +256,14 @@ var (
 	HsaOverrideGfxVersion = String("HSA_OVERRIDE_GFX_VERSION")
 
 	// MetalDeviceIndex selects a specific Metal GPU by its zero-based index on
-	// macOS.  Set this to the index of an external AMD GPU (eGPU) such as the
-	// Radeon VII or RX 6800 to run inference on that device.
+	// macOS.  Set this to the index of an external GPU (eGPU) — such as an
+	// AMD Radeon VII or RX 6800 — to run inference on that device.
 	//
 	// The value is forwarded to the llama.cpp/ggml runner as
 	// GGML_METAL_DEVICE_INDEX.  List available devices and their indices by
 	// running: OLLAMA_DEBUG=1 ollama serve
 	//
-	// Example — use the first eGPU detected:
+	// Example — use the first eGPU detected (index printed at startup):
 	//   export OLLAMA_METAL_DEVICE=1
 	MetalDeviceIndex = String("OLLAMA_METAL_DEVICE")
 )
@@ -339,7 +339,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_EDITOR":             {"OLLAMA_EDITOR", Editor(), "Path to editor for interactive prompt editing (Ctrl+G)"},
 		"OLLAMA_NEW_ENGINE":         {"OLLAMA_NEW_ENGINE", NewEngine(), "Enable the new Ollama engine"},
 		"OLLAMA_REMOTES":            {"OLLAMA_REMOTES", Remotes(), "Allowed hosts for remote models (default \"ollama.com\")"},
-		"OLLAMA_METAL_DEVICE":       {"OLLAMA_METAL_DEVICE", MetalDeviceIndex(), "macOS: zero-based Metal device index for eGPU (AMD Radeon VII / RX 6800). Maps to GGML_METAL_DEVICE_INDEX."},
+		"OLLAMA_METAL_DEVICE":       {"OLLAMA_METAL_DEVICE", MetalDeviceIndex(), "macOS: zero-based Metal device index for eGPU selection (e.g., AMD Radeon VII / RX 6800). Maps to GGML_METAL_DEVICE_INDEX."},
 
 		// Informational
 		"HTTP_PROXY":  {"HTTP_PROXY", String("HTTP_PROXY")(), "HTTP proxy"},
