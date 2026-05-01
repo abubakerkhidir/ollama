@@ -953,8 +953,46 @@ func (s *llmServer) createLayout(systemInfo ml.SystemInfo, systemGPUs []ml.Devic
 // splitLayersByFraction assigns layers to GPUs in detection order according to the
 // given normalized fractions. Each GPU receives floor(fraction * total) layers,
 // with any remainder given to the last GPU.
+//
+// If the entire model (all layers including KV cache) fits within the total memory
+// of the GPU that has the highest split fraction, all layers are assigned to that
+// GPU and the split is ignored. This avoids cross-GPU transfer overhead when a
+// single GPU can hold the full model. The VRAM availability check in buildLayout
+// is the safety net for the case where current free memory is insufficient.
 func splitLayersByFraction(systemGPUs []ml.DeviceInfo, layers []uint64, split []float32) ml.GPULayersList {
 	total := len(layers)
+
+	// Find the GPU with the highest split fraction (the preferred performance GPU).
+	bestIdx := 0
+	for i := 1; i < len(split) && i < len(systemGPUs); i++ {
+		if split[i] > split[bestIdx] {
+			bestIdx = i
+		}
+	}
+
+	// Calculate total model size (weights + KV cache across all layers).
+	var totalSize uint64
+	for _, l := range layers {
+		totalSize += l
+	}
+
+	// If the full model fits within the best GPU's total memory capacity, assign all
+	// layers to it. Running on a single GPU avoids tensor-parallel overhead.
+	// The VRAM free check below will catch the case where another model is still
+	// resident and fall through to the VRAM-aware scheduler.
+	bestGPU := systemGPUs[bestIdx]
+	if bestGPU.TotalMemory > 0 && totalSize+bestGPU.MinimumMemory()+envconfig.GpuOverhead() <= bestGPU.TotalMemory {
+		slog.Info("model fits on single GPU, assigning all layers",
+			"gpu", bestGPU.Name, "id", bestGPU.ID,
+			"model", format.HumanBytes2(totalSize), "total_vram", format.HumanBytes2(bestGPU.TotalMemory))
+		gl := ml.GPULayers{DeviceID: bestGPU.DeviceID}
+		for i := 0; i < total; i++ {
+			gl.Layers = append(gl.Layers, i)
+		}
+		return ml.GPULayersList{gl}
+	}
+
+	// Model doesn't fit on a single GPU; distribute according to the split fractions.
 	result := ml.GPULayersList{}
 	idx := 0
 	for i := 0; i < len(systemGPUs) && i < len(split); i++ {
@@ -1041,7 +1079,7 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 			}
 			needed += graph + minMemory
 			if needed > freeMemory {
-				slog.Debug("layer split override: insufficient VRAM on GPU, using VRAM-aware scheduler",
+				slog.Warn("layer split override: insufficient VRAM on GPU, falling back to VRAM-aware scheduler",
 					"gpu", gl.ID, "needed", format.HumanBytes2(needed), "free", format.HumanBytes2(freeMemory))
 				fits = false
 				break
@@ -1049,7 +1087,7 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 		}
 
 		if fits {
-			slog.Debug("layer split override", "split", split, "result", gpuLayers)
+			slog.Info("layer split override", "split", split, "result", gpuLayers)
 			return gpuLayers, layers
 		}
 	}
@@ -1076,7 +1114,7 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 						gl[i].FreeMemory = 0
 					}
 
-					slog.Debug("available gpu", "id", gl[i].ID, "library", gl[i].Library,
+					slog.Info("available gpu", "id", gl[i].ID, "library", gl[i].Library,
 						"available layer vram", format.HumanBytes2(gl[i].FreeMemory),
 						"backoff", fmt.Sprintf("%.2f", backoff), "minimum", format.HumanBytes2(gl[i].MinimumMemory()),
 						"overhead", format.HumanBytes2(envconfig.GpuOverhead()),
@@ -1157,7 +1195,7 @@ nextLayer:
 	}
 
 	if len(systemGPUs) > 0 && gpuLayers.Sum() == 0 {
-		slog.Debug("insufficient VRAM to load any model layers")
+		slog.Warn("insufficient VRAM to load any model layers")
 	}
 
 	return nil

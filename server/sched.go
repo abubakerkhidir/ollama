@@ -193,7 +193,7 @@ func (s *Scheduler) processPending(ctx context.Context) {
 						break
 					}
 				} else if maxRunners > 0 && loadedCount >= int(maxRunners) {
-					slog.Debug("max runners achieved, unloading one to make room", "runner_count", loadedCount)
+					slog.Info("max runners achieved, unloading one to make room", "runner_count", loadedCount)
 					runnerToExpire = s.findRunnerToUnload()
 				} else {
 					// Either no models are loaded or below envconfig.MaxRunners
@@ -226,7 +226,7 @@ func (s *Scheduler) processPending(ctx context.Context) {
 
 					if loadedCount == 0 {
 						// No models loaded. Load the model but prefer the best fit.
-						slog.Debug("loading first model", "model", pending.model.ModelPath)
+						slog.Info("loading first model", "model", pending.model.ModelPath)
 						s.loadFn(pending, systemInfo, gpus, false)
 						break
 					}
@@ -236,7 +236,7 @@ func (s *Scheduler) processPending(ctx context.Context) {
 					logutil.Trace("loading additional model", "model", pending.model.ModelPath)
 					needEvict := s.loadFn(pending, systemInfo, gpus, true)
 					if !needEvict {
-						slog.Debug("new model fits with existing models, loading")
+						slog.Info("new model fits with existing models, loading")
 						break
 					}
 
@@ -251,7 +251,7 @@ func (s *Scheduler) processPending(ctx context.Context) {
 				}
 				// Trigger an expiration to unload once it's done
 				runnerToExpire.refMu.Lock()
-				slog.Debug("resetting model to expire immediately to make room", "runner", runnerToExpire, "refCount", runnerToExpire.refCount)
+				slog.Info("resetting model to expire immediately to make room", "runner", runnerToExpire, "refCount", runnerToExpire.refCount)
 				if runnerToExpire.expireTimer != nil {
 					runnerToExpire.expireTimer.Stop()
 					runnerToExpire.expireTimer = nil
