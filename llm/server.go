@@ -969,31 +969,129 @@ func (s *llmServer) createLayout(systemInfo ml.SystemInfo, systemGPUs []ml.Devic
 	return gpuLayers, nil
 }
 
-// splitLayersByFraction assigns layers to GPUs in detection order according to the
-// given normalized fractions. Each GPU receives floor(fraction * total) layers,
-// with any remainder given to the last GPU.
-func splitLayersByFraction(systemGPUs []ml.DeviceInfo, layers []uint64, split []float32) ml.GPULayersList {
+// splitLayersClamped distributes layers across GPUs according to the given normalized
+// fractions, but clamps each GPU's allocation to what actually fits in free VRAM.
+// Each layer's cost in `layers[i]` already includes both weight bytes and KV-cache bytes.
+// Fixed per-GPU overhead (ROCm/CUDA runtime, graph capture, OLLAMA_GPU_OVERHEAD) is
+// subtracted from FreeMemory before comparing.
+//
+// When a GPU cannot hold its ideal fraction, the overflow is redistributed to the
+// preceding GPU (backward propagation), keeping all layer ranges contiguous:
+//
+//	example: OLLAMA_GPU_LAYER_SPLIT=27,73, 65 layers, 6800 fits only 40
+//	  backward pass:  i=1: overflow 7 → counts=[25,40]
+//	                  i=0: 25 layers fit ✓
+//	  final:  GPU0 → layers 0-24   GPU1 → layers 25-64
+//
+// Returns nil when layers cannot be fully distributed (true OOM → caller uses the
+// VRAM-aware scheduler instead).
+func splitLayersClamped(systemGPUs []ml.DeviceInfo, layers []uint64, split []float32, memory *ml.BackendMemory) ml.GPULayersList {
+	n := min(len(systemGPUs), len(split))
 	total := len(layers)
+	if n == 0 || total == 0 {
+		return nil
+	}
 
-	// Distribute according to the split fractions.
+	// Per-GPU byte budget after all fixed overheads.
+	devIDs := make([]ml.DeviceID, n)
+	avail := make([]uint64, n)
+	for i := 0; i < n; i++ {
+		g := systemGPUs[i]
+		devIDs[i] = g.DeviceID
+		var graph uint64
+		for j := range memory.GPUs {
+			if memory.GPUs[j].DeviceID == g.DeviceID {
+				graph = memory.GPUs[j].Graph
+				break
+			}
+		}
+		fixed := g.MinimumMemory() + graph + envconfig.GpuOverhead()
+		if g.FreeMemory > fixed {
+			avail[i] = g.FreeMemory - fixed
+		}
+	}
+
+	// Ideal layer counts from fractions; last GPU absorbs rounding remainder.
+	counts := make([]int, n)
+	for i := 0; i < n; i++ {
+		if i == n-1 {
+			counts[i] = total
+			for j := 0; j < n-1; j++ {
+				counts[i] -= counts[j]
+			}
+		} else {
+			counts[i] = int(float32(total) * split[i])
+		}
+		if counts[i] < 0 {
+			counts[i] = 0
+		}
+	}
+
+	// Backward pass: if GPU[i] cannot hold its ideal layer count, reduce it and push
+	// the overflow to GPU[i-1].  Using tail as a cursor: GPU[i] gets the `counts[i]`
+	// layers immediately before `tail`, so start = tail-counts[i] and end = tail.
+	// After GPU[i] is processed tail moves to start, giving GPU[i-1] its end boundary.
+	tail := total
+	for i := n - 1; i >= 0; i-- {
+		end := tail
+		start := end - counts[i]
+		if start < 0 {
+			start = 0
+			counts[i] = end
+		}
+
+		// How many consecutive layers from start fit within avail[i]?
+		var used uint64
+		fitted := 0
+		for k := start; k < end; k++ {
+			if used+layers[k] > avail[i] {
+				break
+			}
+			used += layers[k]
+			fitted++
+		}
+
+		if fitted < counts[i] {
+			overflow := counts[i] - fitted
+			slog.Info("split: GPU memory-clamped, redistributing layers to previous GPU",
+				"gpu", systemGPUs[i].Name, "ideal", counts[i], "fitted", fitted,
+				"overflow", overflow, "free_vram", format.HumanBytes2(systemGPUs[i].FreeMemory),
+				"avail_for_layers", format.HumanBytes2(avail[i]))
+			counts[i] = fitted
+			if i > 0 {
+				counts[i-1] += overflow
+			} else {
+				// First GPU still overflows → true OOM.
+				slog.Warn("split: cannot distribute all layers even after redistribution, falling back to VRAM scheduler",
+					"unfit_layers", overflow)
+				return nil
+			}
+		}
+		tail -= counts[i]
+	}
+	if tail != 0 {
+		slog.Warn("split: layer accounting mismatch, falling back to VRAM scheduler", "remaining", tail)
+		return nil
+	}
+
+	// Build the final contiguous assignment.
 	result := ml.GPULayersList{}
 	idx := 0
-	for i := 0; i < len(systemGPUs) && i < len(split); i++ {
-		var count int
-		if i == len(split)-1 || i == len(systemGPUs)-1 {
-			count = total - idx // last GPU gets all remaining layers
-		} else {
-			count = int(float32(total) * split[i])
+	for i := 0; i < n; i++ {
+		if counts[i] == 0 {
+			continue
 		}
-		if count <= 0 || idx >= total {
-			break
-		}
-		gl := ml.GPULayers{DeviceID: systemGPUs[i].DeviceID}
-		for j := idx; j < idx+count && j < total; j++ {
-			gl.Layers = append(gl.Layers, j)
+		gl := ml.GPULayers{DeviceID: devIDs[i]}
+		for k := idx; k < idx+counts[i]; k++ {
+			gl.Layers = append(gl.Layers, k)
 		}
 		result = append(result, gl)
-		idx += count
+		slog.Info("split assignment",
+			"gpu", systemGPUs[i].Name,
+			"layers", counts[i],
+			"ideal_pct", fmt.Sprintf("%.0f%%", split[i]*100),
+			"actual_pct", fmt.Sprintf("%.1f%%", float32(counts[i])*100/float32(total)))
+		idx += counts[i]
 	}
 	return result
 }
@@ -1075,46 +1173,16 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 			}
 		}
 
-		gpuLayers := splitLayersByFraction(systemGPUs, layers, split)
-
-		// Verify each GPU has enough free VRAM for its assigned layers before committing
-		// to the split. If another model is still resident (e.g. keep-alive not yet expired),
-		// a GPU may not have enough free space, causing an OOM crash in the runner process.
-		// In that case, fall through to the normal VRAM-aware scheduler which will distribute
-		// layers according to actual available memory.
-		fits := true
-		for _, gl := range gpuLayers {
-			var freeMemory, minMemory, graph uint64
-			for i := range systemGPUs {
-				if systemGPUs[i].DeviceID == gl.DeviceID {
-					freeMemory = systemGPUs[i].FreeMemory
-					minMemory = systemGPUs[i].MinimumMemory()
-					break
-				}
-			}
-			for j := range memory.GPUs {
-				if memory.GPUs[j].DeviceID == gl.DeviceID {
-					graph = memory.GPUs[j].Graph
-					break
-				}
-			}
-			var needed uint64
-			for _, l := range gl.Layers {
-				needed += layers[l]
-			}
-			needed += graph + minMemory
-			if needed > freeMemory {
-				slog.Warn("layer split override: insufficient VRAM on GPU, falling back to VRAM-aware scheduler",
-					"gpu", gl.ID, "needed", format.HumanBytes2(needed), "free", format.HumanBytes2(freeMemory))
-				fits = false
-				break
-			}
-		}
-
-		if fits {
+		// Memory-clamped split: honor fractions but redistribute overflow to earlier
+		// GPUs when a GPU cannot fit its ideal share (e.g. during model switches when
+		// the previous model is still partially resident).  Falls back to the
+		// VRAM-aware scheduler only on true OOM (all GPUs exhausted).
+		gpuLayers := splitLayersClamped(systemGPUs, layers, split, memory)
+		if gpuLayers != nil {
 			slog.Info("layer split override", "split", split, "result", gpuLayers)
 			return gpuLayers, layers
 		}
+		slog.Warn("layer split override: true OOM, falling back to VRAM-aware scheduler")
 	}
 
 	gpuLayers := ml.GPULayersList{}
