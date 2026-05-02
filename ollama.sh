@@ -1,5 +1,6 @@
-# Force 6800 (card2) to COMPUTE power profile and max sclk so it ramps to 2475MHz under load
+# Set 6800 (card2) to COMPUTE power profile on start, restore default on exit
 sudo bash -c "echo 5 > /sys/class/drm/card2/device/pp_power_profile_mode && echo 2 > /sys/class/drm/card2/device/pp_dpm_sclk" 2>/dev/null
+trap 'sudo bash -c "echo 0 > /sys/class/drm/card2/device/pp_power_profile_mode" 2>/dev/null' EXIT
 
 export HSA_IGNORE_AMD_PLATFORM_CHECK=1
 export HIP_VISIBLE_DEVICES=0,1

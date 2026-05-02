@@ -279,12 +279,16 @@ func NewLlamaServer(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, modelPath st
 	// unless the user has already set either flag explicitly.
 	if _, mmqSet := os.LookupEnv("GGML_CUDA_FORCE_MMQ"); !mmqSet {
 		if _, cublasSet := os.LookupEnv("GGML_CUDA_FORCE_CUBLAS"); !cublasSet {
-			for _, gpu := range gpus {
-				if gpu.Library == "ROCm" {
-					visibleDevEnvs["GGML_CUDA_FORCE_MMQ"] = "1"
-					slog.Info("ROCm: forcing MMQ kernels (faster than rocBLAS for quantized generation)")
-					break
+			if envconfig.ForceRDNA2() {
+				for _, gpu := range gpus {
+					if gpu.Library == "ROCm" {
+						visibleDevEnvs["GGML_CUDA_FORCE_MMQ"] = "1"
+						slog.Info("ROCm: forcing MMQ kernels (faster than rocBLAS for quantized generation)")
+						break
+					}
 				}
+			} else {
+				slog.Info("ROCm: MMQ override disabled via OLLAMA_FORCE_RDNA2=0")
 			}
 		}
 	}
@@ -1029,23 +1033,46 @@ func (s *llmServer) buildLayout(systemGPUs []ml.DeviceInfo, memory *ml.BackendMe
 	// according to the given percentages (in GPU detection order).
 	// Example: OLLAMA_GPU_LAYER_SPLIT=42,58 → GPU0 gets 42% of layers, GPU1 gets 58%.
 	if split := envconfig.GpuLayerSplit(); len(split) > 0 && len(systemGPUs) > 0 {
-		// Single-GPU optimization: if the model fits entirely on the GPU with the most
-		// free memory (gpus[0] after sort), assign all layers to it. This avoids
-		// cross-GPU transfer overhead and is independent of the split fractions.
+		// Single-GPU optimization: if the model fits entirely on one GPU, assign all
+		// layers to it to avoid cross-GPU transfer overhead. Prefer GPUs in split-fraction
+		// order (highest fraction first) so the user-designated primary GPU is tried first.
 		var totalSize uint64
 		for _, l := range layers {
 			totalSize += l
 		}
-		preferredGPU := gpus[0]
-		if preferredGPU.TotalMemory > 0 && totalSize+preferredGPU.MinimumMemory()+envconfig.GpuOverhead() <= preferredGPU.TotalMemory {
-			slog.Info("model fits on single GPU, assigning all layers",
-				"gpu", preferredGPU.Name, "id", preferredGPU.ID,
-				"model", format.HumanBytes2(totalSize), "total_vram", format.HumanBytes2(preferredGPU.TotalMemory))
-			gl := ml.GPULayers{DeviceID: preferredGPU.DeviceID}
-			for i := range layers {
-				gl.Layers = append(gl.Layers, i)
+		type gpuWithFrac struct {
+			gpu  ml.DeviceInfo
+			frac float32
+		}
+		ordered := make([]gpuWithFrac, 0, len(systemGPUs))
+		for i, g := range systemGPUs {
+			frac := float32(0)
+			if i < len(split) {
+				frac = split[i]
 			}
-			return ml.GPULayersList{gl}, layers
+			ordered = append(ordered, gpuWithFrac{g, frac})
+		}
+		sort.Slice(ordered, func(i, j int) bool { return ordered[i].frac > ordered[j].frac })
+		for _, gf := range ordered {
+			var graph uint64
+			for j := range memory.GPUs {
+				if memory.GPUs[j].DeviceID == gf.gpu.DeviceID {
+					graph = memory.GPUs[j].Graph
+					break
+				}
+			}
+			needed := totalSize + gf.gpu.MinimumMemory() + envconfig.GpuOverhead() + graph
+			if gf.gpu.FreeMemory >= needed {
+				slog.Info("model fits on single GPU, assigning all layers",
+					"gpu", gf.gpu.Name, "id", gf.gpu.ID,
+					"split_frac", fmt.Sprintf("%.0f%%", gf.frac*100),
+					"model", format.HumanBytes2(totalSize), "free_vram", format.HumanBytes2(gf.gpu.FreeMemory))
+				gl := ml.GPULayers{DeviceID: gf.gpu.DeviceID}
+				for i := range layers {
+					gl.Layers = append(gl.Layers, i)
+				}
+				return ml.GPULayersList{gl}, layers
+			}
 		}
 
 		gpuLayers := splitLayersByFraction(systemGPUs, layers, split)

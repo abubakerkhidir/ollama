@@ -326,6 +326,21 @@ func GpuLayerSplit() []float32 {
 	return vals
 }
 
+// ForceRDNA2 returns true (default) when Ollama should force MMQ kernels for ROCm GPUs.
+// Set OLLAMA_FORCE_RDNA2=0 to disable and allow rocBLAS selection instead.
+func ForceRDNA2() bool {
+	s := Var("OLLAMA_FORCE_RDNA2")
+	if s == "" {
+		return true // default on for ROCm
+	}
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		slog.Warn("invalid OLLAMA_FORCE_RDNA2 value, defaulting to true", "value", s)
+		return true
+	}
+	return v
+}
+
 // GpuVramWeights returns per-GPU virtual VRAM multipliers applied during layer assignment.
 // Specify as a comma-separated list of positive floats in GPU detection order.
 // Example: OLLAMA_GPU_VRAM_WEIGHTS=2.0,1.0 doubles effective VRAM of the first detected GPU,
@@ -373,6 +388,7 @@ func AsMap() map[string]EnvVar {
 		"OLLAMA_NOPRUNE":            {"OLLAMA_NOPRUNE", NoPrune(), "Do not prune model blobs on startup"},
 		"OLLAMA_NUM_PARALLEL":       {"OLLAMA_NUM_PARALLEL", NumParallel(), "Maximum number of parallel requests"},
 		"OLLAMA_ORIGINS":            {"OLLAMA_ORIGINS", AllowedOrigins(), "A comma separated list of allowed origins"},
+		"OLLAMA_FORCE_RDNA2":        {"OLLAMA_FORCE_RDNA2", ForceRDNA2(), "Force MMQ kernels for ROCm GPUs (default true, set 0 to disable)"},
 		"OLLAMA_SCHED_SPREAD":       {"OLLAMA_SCHED_SPREAD", SchedSpread(), "Always schedule model across all GPUs"},
 		"OLLAMA_MULTIUSER_CACHE":    {"OLLAMA_MULTIUSER_CACHE", MultiUserCache(), "Optimize prompt caching for multi-user scenarios"},
 		"OLLAMA_CONTEXT_LENGTH":     {"OLLAMA_CONTEXT_LENGTH", ContextLength(), "Context length to use unless otherwise specified (default: 4k/32k/256k based on VRAM)"},

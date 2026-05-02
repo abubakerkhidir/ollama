@@ -63,7 +63,6 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <charconv>
 #include <cinttypes>
 #include <condition_variable>
@@ -3997,31 +3996,7 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
     bool graph_evaluated_or_captured = false;
 
-#if defined(GGML_USE_HIP)
-    {
-        static std::atomic<int> s_gc_logged{0};
-        if (s_gc_logged.fetch_add(1) < 3) {
-            GGML_LOG_INFO("[HIP-DIAG] graph_compute: dev=%d nodes=%d use_cuda_graph=%d update_required=%d\n",
-                cuda_ctx->device, cgraph->n_nodes,
-                (int)use_cuda_graph, (int)cuda_graph_update_required);
-        }
-    }
-    auto t0_gc = std::chrono::steady_clock::now();
-#endif
-
     evaluate_and_capture_cuda_graph(cuda_ctx, cgraph, graph_evaluated_or_captured, use_cuda_graph, cuda_graph_update_required);
-
-#if defined(GGML_USE_HIP)
-    {
-        auto t1_gc = std::chrono::steady_clock::now();
-        static std::atomic<int> s_gc_time_logged{0};
-        if (s_gc_time_logged.fetch_add(1) < 6) {
-            double ms = std::chrono::duration<double, std::milli>(t1_gc - t0_gc).count();
-            GGML_LOG_INFO("[HIP-DIAG] graph_compute time: dev=%d nodes=%d use_graph=%d wall_ms=%.2f\n",
-                cuda_ctx->device, cgraph->n_nodes, (int)use_cuda_graph, ms);
-        }
-    }
-#endif
 
     return GGML_STATUS_SUCCESS;
 }
