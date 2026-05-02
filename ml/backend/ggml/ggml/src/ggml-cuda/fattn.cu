@@ -6,6 +6,8 @@
 #include "fattn-wmma-f16.cuh"
 #include "fattn.cuh"
 
+#include <atomic>
+
 template <int DKQ, int DV, int ncols2>
 static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols1(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
@@ -369,7 +371,33 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
 
 void ggml_cuda_flash_attn_ext(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     ggml_cuda_set_device(ctx.device);
-    switch (ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst)) {
+    const ggml_tensor * Q = dst->src[0];
+    const ggml_tensor * K = dst->src[1];
+    const ggml_tensor * V = dst->src[2];
+    const best_fattn_kernel kernel_id = ggml_cuda_get_best_fattn_kernel(ggml_cuda_get_device(), dst);
+
+#if defined(GGML_USE_HIP)
+    {
+        static std::atomic<int> s_fa_logged{0};
+        if (s_fa_logged.fetch_add(1) < 4) {
+            const char * kname =
+                kernel_id == BEST_FATTN_KERNEL_NONE     ? "NONE"    :
+                kernel_id == BEST_FATTN_KERNEL_TILE     ? "TILE"    :
+                kernel_id == BEST_FATTN_KERNEL_VEC      ? "VEC"     :
+                kernel_id == BEST_FATTN_KERNEL_WMMA_F16 ? "WMMA"    :
+                kernel_id == BEST_FATTN_KERNEL_MMA_F16  ? "MMA"     : "?";
+            const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+            GGML_LOG_INFO("[HIP-DIAG] fattn: dev=%d cc=0x%x kernel=%s "
+                "D=%lld K_type=%s V_type=%s Q_ne1=%lld Q_ne2=%lld\\n",
+                ggml_cuda_get_device(), cc, kname,
+                (long long)K->ne[0],
+                ggml_type_name(K->type), ggml_type_name(V->type),
+                (long long)Q->ne[1], (long long)Q->ne[2]);
+        }
+    }
+#endif
+
+    switch (kernel_id) {
         case BEST_FATTN_KERNEL_NONE:
             GGML_ABORT("fatal error");
         case BEST_FATTN_KERNEL_TILE:

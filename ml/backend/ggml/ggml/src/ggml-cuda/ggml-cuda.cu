@@ -63,6 +63,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <charconv>
 #include <cinttypes>
 #include <condition_variable>
@@ -2398,21 +2399,50 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
 #endif
 
 #if defined(GGML_USE_HIP)
-    // Per-device diagnostic: log which mul_mat path is chosen.
-    // Log once each for ne11>1 (prompt) and ne11==1 (generation) per device.
-    if (ggml_is_quantized(src0->type)) {
-        static std::atomic<int> s_logged_gen{0};
-        static std::atomic<int> s_logged_prompt{0};
+    // Comprehensive mul_mat dispatch diagnostics for ALL types.
+    // Log once per (is_gen, src0_type) pair to capture every kernel path.
+    {
+        static std::atomic<int> s_diag_gen{0};
+        static std::atomic<int> s_diag_prompt{0};
         bool is_gen = (src1->ne[1] == 1);
-        auto & counter = is_gen ? s_logged_gen : s_logged_prompt;
-        if (counter.fetch_add(1) < 2) {
-            GGML_LOG_INFO("mul_mat diag(%s): dev=%d cc=0x%x src0=%s ne11=%lld "
-                "use_mmvq=%d use_mmq=%d cublas_f16=%d cublas_bf16=%d cublas_f32=%d split=%d\n",
+        auto & diag_counter = is_gen ? s_diag_gen : s_diag_prompt;
+        if (diag_counter.fetch_add(1) < 4) {
+            const int dev_warp = ggml_cuda_info().devices[ctx.device].warp_size;
+            GGML_LOG_INFO("[HIP-DIAG] mul_mat(%s): dev=%d cc=0x%x warp=%d "
+                "src0=%s(%lldx%lld) src1=(%lldx%lld) "
+                "mmvf=%d mmf=%d mmvq=%d mmq=%d "
+                "cublas_f16=%d cublas_bf16=%d cublas_f32=%d split=%d bad_pad=%d\n",
                 is_gen ? "GEN" : "PROMPT",
-                ctx.device, cc, ggml_type_name(src0->type), (long long)src1->ne[1],
+                ctx.device, cc, dev_warp,
+                ggml_type_name(src0->type), (long long)src0->ne[0], (long long)src0->ne[1],
+                (long long)src1->ne[0], (long long)src1->ne[1],
+                (int)use_mul_mat_vec_f, (int)use_mul_mat_f,
                 (int)use_mul_mat_vec_q, (int)use_mul_mat_q,
                 (int)use_batched_cublas_f16, (int)use_batched_cublas_bf16, (int)use_batched_cublas_f32,
-                (int)split);
+                (int)split, (int)bad_padding_clear);
+        }
+    }
+#endif
+
+#if defined(GGML_USE_HIP)
+    // Log the actual dispatched kernel path (one-time per direction).
+    {
+        static std::atomic<int> s_dispatch_gen{0};
+        static std::atomic<int> s_dispatch_prompt{0};
+        bool is_gen = (src1->ne[1] == 1);
+        auto & dc = is_gen ? s_dispatch_gen : s_dispatch_prompt;
+        if (dc.fetch_add(1) < 4) {
+            const char * path =
+                (!split && use_mul_mat_vec_f)  ? "mmvf_direct" :
+                (!split && use_mul_mat_f)      ? "mmf_direct"  :
+                (!split && use_mul_mat_vec_q)  ? "mmvq_direct" :
+                (!split && use_mul_mat_q)      ? "mmq_direct"  :
+                (!split && (use_batched_cublas_f16 || use_batched_cublas_bf16 || use_batched_cublas_f32)) ? "cublas_batched" :
+                (use_mul_mat_vec_f)            ? "mmvf_op"     :
+                (use_mul_mat_vec_q)            ? "mmvq_op"     :
+                (use_mul_mat_q)                ? "mmq_op"      : "cublas_fallback";
+            GGML_LOG_INFO("[HIP-DIAG] dispatch(%s): dev=%d -> %s\n",
+                is_gen ? "GEN" : "PROMPT", ctx.device, path);
         }
     }
 #endif
@@ -3967,7 +3997,31 @@ static enum ggml_status ggml_backend_cuda_graph_compute(ggml_backend_t backend, 
 
     bool graph_evaluated_or_captured = false;
 
+#if defined(GGML_USE_HIP)
+    {
+        static std::atomic<int> s_gc_logged{0};
+        if (s_gc_logged.fetch_add(1) < 3) {
+            GGML_LOG_INFO("[HIP-DIAG] graph_compute: dev=%d nodes=%d use_cuda_graph=%d update_required=%d\n",
+                cuda_ctx->device, cgraph->n_nodes,
+                (int)use_cuda_graph, (int)cuda_graph_update_required);
+        }
+    }
+    auto t0_gc = std::chrono::steady_clock::now();
+#endif
+
     evaluate_and_capture_cuda_graph(cuda_ctx, cgraph, graph_evaluated_or_captured, use_cuda_graph, cuda_graph_update_required);
+
+#if defined(GGML_USE_HIP)
+    {
+        auto t1_gc = std::chrono::steady_clock::now();
+        static std::atomic<int> s_gc_time_logged{0};
+        if (s_gc_time_logged.fetch_add(1) < 6) {
+            double ms = std::chrono::duration<double, std::milli>(t1_gc - t0_gc).count();
+            GGML_LOG_INFO("[HIP-DIAG] graph_compute time: dev=%d nodes=%d use_graph=%d wall_ms=%.2f\n",
+                cuda_ctx->device, cgraph->n_nodes, (int)use_cuda_graph, ms);
+        }
+    }
+#endif
 
     return GGML_STATUS_SUCCESS;
 }
