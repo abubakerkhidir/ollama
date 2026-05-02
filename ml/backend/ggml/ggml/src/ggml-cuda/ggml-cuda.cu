@@ -2398,13 +2398,17 @@ static void ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor
 #endif
 
 #if defined(GGML_USE_HIP)
-    // One-time per-device diagnostic: log which mul_mat path is chosen for quantized ops.
-    // Helps diagnose slow inference (e.g. scalar DP4A fallback vs hardware sdot4).
+    // Per-device diagnostic: log which mul_mat path is chosen.
+    // Log once each for ne11>1 (prompt) and ne11==1 (generation) per device.
     if (ggml_is_quantized(src0->type)) {
-        static std::atomic<int> s_logged{0};
-        if (s_logged.fetch_add(1) < 4) {
-            GGML_LOG_INFO("mul_mat diag: dev=%d cc=0x%x src0=%s ne11=%lld "
+        static std::atomic<int> s_logged_gen{0};
+        static std::atomic<int> s_logged_prompt{0};
+        bool is_gen = (src1->ne[1] == 1);
+        auto & counter = is_gen ? s_logged_gen : s_logged_prompt;
+        if (counter.fetch_add(1) < 2) {
+            GGML_LOG_INFO("mul_mat diag(%s): dev=%d cc=0x%x src0=%s ne11=%lld "
                 "use_mmvq=%d use_mmq=%d cublas_f16=%d cublas_bf16=%d cublas_f32=%d split=%d\n",
+                is_gen ? "GEN" : "PROMPT",
                 ctx.device, cc, ggml_type_name(src0->type), (long long)src1->ne[1],
                 (int)use_mul_mat_vec_q, (int)use_mul_mat_q,
                 (int)use_batched_cublas_f16, (int)use_batched_cublas_bf16, (int)use_batched_cublas_f32,
